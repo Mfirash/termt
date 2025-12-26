@@ -59,6 +59,6 @@ void char_input(char c);
 void hidecursor();
 void showcursor();
 
-void write(const std::string& text);
+void ioterm_write(const std::string& text);
 void parse_sgr_parameter(int param);
 void handle_csi(char command, const std::string& sequence);
