@@ -3,13 +3,13 @@
 #include <iostream>
 #include <algorithm>
 #include <string>
-
 #ifdef _WIN32
 #include <io.h>
 #include <fcntl.h>
 #include <winpty.h>
 #include <windows.h>
 #endif
+#include <gtkmm/clipboard.h>
 
 termwidget::termwidget() : winpty_instance(nullptr),
                            is_selecting(false),
@@ -157,6 +157,19 @@ bool termwidget::on_draw(const Cairo::RefPtr<Cairo::Context> &cr)
             }
         }
     }
+    if (is_selecting) {
+        int start_x = std::min(sel_start_x, sel_end_x);
+        int end_x = std::max(sel_start_x, sel_end_x);
+        int start_y = std::min(sel_start_y, sel_end_y);
+        int end_y = std::max(sel_start_y, sel_end_y);
+        cr->set_source_rgba(0.0, 0.0, 1.0, 0.3);
+        for (int r = start_y; r <= end_y; ++r) {
+            int c_start = (r == start_y) ? start_x : 0;
+            int c_end = (r == end_y) ? end_x : cols - 1;
+            cr->rectangle(c_start * CHAR_WIDTH, r * CHAR_HEIGHT, (c_end - c_start + 1) * CHAR_WIDTH, CHAR_HEIGHT);
+            cr->fill();
+        }
+    }
     if (cursor_visible && cursor_x >= 0 && cursor_x < cols && cursor_y >= 0 && cursor_y < rows)
     {
         cr->set_source_rgba(0.0, 0.8, 0.0, 0.5);
@@ -236,6 +249,28 @@ void termwidget::on_size_allocate(Gtk::Allocation &allocation)
 
 bool termwidget::on_key_press_event(GdkEventKey *event)
 {
+    if (event->state & GDK_CONTROL_MASK) {
+        if (event->keyval == GDK_KEY_c || event->keyval == GDK_KEY_C) {
+            std::string selected_text = get_selected_text();
+            if (!selected_text.empty()) {
+                Glib::RefPtr<Gtk::Clipboard> clipboard = Gtk::Clipboard::get();
+                clipboard->set_text(selected_text);
+            }
+            return true;
+        } else if (event->keyval == GDK_KEY_v || event->keyval == GDK_KEY_V) {
+            Glib::RefPtr<Gtk::Clipboard> clipboard = Gtk::Clipboard::get();
+            std::string text = clipboard->wait_for_text();
+            if (!text.empty()) {
+                std::lock_guard<std::mutex> lock(input_mutex);
+                for (char c : text) {
+                    input_buffer.push_back(c);
+                }
+                uv_async_send(&async_write_handle);
+            }
+            return true;
+        }
+    }
+
     std::string input;
 
     switch (event->keyval)
@@ -337,6 +372,49 @@ bool termwidget::on_key_press_event(GdkEventKey *event)
     return true;
 }
 
-bool termwidget::on_button_press_event(GdkEventButton *event) { return true; }
-bool termwidget::on_button_release_event(GdkEventButton *event) { return true; }
-bool termwidget::on_motion_notify_event(GdkEventMotion *event) { return true; }
+bool termwidget::on_button_press_event(GdkEventButton *event) {
+    if (event->button == 1) {
+        is_selecting = true;
+        sel_start_x = std::max(0, std::min(cols - 1, (int)(event->x / CHAR_WIDTH)));
+        sel_start_y = std::max(0, std::min(rows - 1, (int)(event->y / CHAR_HEIGHT)));
+        sel_end_x = sel_start_x;
+        sel_end_y = sel_start_y;
+        queue_draw();
+    }
+    return true;
+}
+bool termwidget::on_button_release_event(GdkEventButton *event) {
+    if (event->button == 1) {
+        is_selecting = false;
+        queue_draw();
+    }
+    return true;
+}
+bool termwidget::on_motion_notify_event(GdkEventMotion *event) {
+    if (is_selecting) {
+        sel_end_x = std::max(0, std::min(cols - 1, (int)(event->x / CHAR_WIDTH)));
+        sel_end_y = std::max(0, std::min(rows - 1, (int)(event->y / CHAR_HEIGHT)));
+        queue_draw();
+    }
+    return true;
+}
+
+std::string termwidget::get_selected_text() {
+    if (!is_selecting) return "";
+    int start_x = std::min(sel_start_x, sel_end_x);
+    int end_x = std::max(sel_start_x, sel_end_x);
+    int start_y = std::min(sel_start_y, sel_end_y);
+    int end_y = std::max(sel_start_y, sel_end_y);
+    std::string text;
+    for (int r = start_y; r <= end_y; ++r) {
+        int c_start = (r == start_y) ? start_x : 0;
+        int c_end = (r == end_y) ? end_x : cols - 1;
+        for (int c = c_start; c <= c_end; ++c) {
+            if (c < cols && r < rows) {
+                text += grid[r][c].character;
+            }
+        }
+        if (r < end_y) text += '\n';
+    }
+    return text;
+}
